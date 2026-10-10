@@ -4,11 +4,13 @@ import tempfile
 import base64
 from pathlib import Path
 from mcp.server.mcpserver import MCPServer
+from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route, Mount
 
 PORT = int(os.environ.get("PORT", 8000))
 
-# 1. Initialize MCP Server
 mcp = MCPServer("latex-to-pdf")
 
 DEFAULT_PREAMBLE = r"""\documentclass[11pt,a4paper]{article}
@@ -64,19 +66,37 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
         except Exception as e:
             return f"SYSTEM_ERROR: {str(e)}"
 
-if __name__ == "__main__":
-    # 2. Extract underlying Starlette app and inject CORS middleware
-    # This allows gemini.google.com to negotiate preflight requests
-    app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
-    
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["mcp-session-id", "content-type"],
-    )
+# Extract the base MCP Starlette application
+mcp_sub_app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
 
+# Health check & Discovery handler for Gemini probing
+async def health_check(request):
+    return JSONResponse({
+        "status": "ok",
+        "name": "latex-to-pdf",
+        "protocol": "mcp",
+        "tools": ["compile_latex"]
+    })
+
+# Master application routing both /mcp and root /
+main_app = Starlette(
+    routes=[
+        Route("/", health_check, methods=["GET"]),
+        Route("/health", health_check, methods=["GET"]),
+        Mount("/mcp", mcp_sub_app),
+        Mount("/", mcp_sub_app)
+    ]
+)
+
+main_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
+
+if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(main_app, host="0.0.0.0", port=PORT)
