@@ -4,15 +4,15 @@ import tempfile
 import base64
 from pathlib import Path
 from mcp.server.mcpserver import MCPServer
-from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
-from starlette.routing import Route, Mount
-import uvicorn
 
-PORT = int(os.environ.get("PORT", 8000))
+# Allow all host headers for cloud proxies (Render, Cloudflare)
 os.environ["MCP_ALLOWED_HOSTS"] = "*"
 
+PORT = int(os.environ.get("PORT", 8000))
+
+# 1. Initialize MCP Server
 mcp = MCPServer("latex-to-pdf")
 
 DEFAULT_PREAMBLE = r"""\documentclass[11pt,a4paper]{article}
@@ -68,29 +68,34 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
         except Exception as e:
             return f"SYSTEM_ERROR: {str(e)}"
 
-mcp_sub_app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
+# 2. Get the base MCP Starlette application
+mcp_app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
 
-# Directly handle both /mcp and /mcp/ so NO 307 redirect occurs
-async def mcp_direct_handler(request):
-    return await mcp_sub_app(request.scope, request.receive, request.send)
+# 3. Pure ASGI wrapper that intercepts discovery probes and passes raw ASGI (scope, receive, send)
+class CombinedMCPApp:
+    def __init__(self, inner_app):
+        self.inner_app = inner_app
 
-async def oauth_discovery(request):
-    return JSONResponse({}, status_code=200)
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            
+            # Handle OAuth discovery probes from Gemini
+            if path.startswith("/.well-known/oauth-protected-resource"):
+                response = JSONResponse({}, status_code=200)
+                await response(scope, receive, send)
+                return
 
-main_app = Starlette(
-    lifespan=getattr(mcp_sub_app.router, "lifespan_context", None),
-    routes=[
-        Route("/.well-known/oauth-protected-resource", oauth_discovery, methods=["GET", "OPTIONS"]),
-        Route("/.well-known/oauth-protected-resource/mcp", oauth_discovery, methods=["GET", "OPTIONS"]),
-        # Exact route match prevents 307 redirect on POST
-        Route("/mcp", mcp_direct_handler, methods=["GET", "POST", "HEAD", "OPTIONS"]),
-        Route("/mcp/", mcp_direct_handler, methods=["GET", "POST", "HEAD", "OPTIONS"]),
-        Route("/", mcp_direct_handler, methods=["GET", "POST", "HEAD", "OPTIONS"]),
-    ]
-)
+            # Normalize path: map both /mcp and /mcp/ to the internal MCP handler path
+            if path in ["/mcp", "/mcp/"]:
+                scope["path"] = "/mcp"
 
-main_app.add_middleware(
-    CORSMiddleware,
+        # Delegate directly with valid scope, receive, and send callables
+        await self.inner_app(scope, receive, send)
+
+# Wrap with CORS
+app = CORSMiddleware(
+    CombinedMCPApp(mcp_app),
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
@@ -99,4 +104,5 @@ main_app.add_middleware(
 )
 
 if __name__ == "__main__":
-    uvicorn.run(main_app, host="0.0.0.0", port=PORT, proxy_headers=True, forwarded_allow_ips="*")
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PORT, proxy_headers=True, forwarded_allow_ips="*")
