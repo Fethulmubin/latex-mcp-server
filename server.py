@@ -5,10 +5,9 @@ import base64
 from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 
-# Render provides the port in the PORT environment variable
 PORT = int(os.environ.get("PORT", 8000))
 
-# 1. Initialize with ONLY the server name (do not pass host or port here)
+# Initialize MCPServer
 mcp = MCPServer("latex-to-pdf")
 
 DEFAULT_PREAMBLE = r"""\documentclass[11pt,a4paper]{article}
@@ -23,7 +22,7 @@ DEFAULT_PREAMBLE = r"""\documentclass[11pt,a4paper]{article}
 
 @mcp.tool()
 def compile_latex(latex_source: str, filename: str = "document") -> str:
-    """Compiles LaTeX into a PDF and returns it as a Base64 data URI."""
+    """Compiles LaTeX markup into a PDF and returns a Base64 data URI."""
     code = latex_source.strip()
     if r"\documentclass" not in code:
         code = f"{DEFAULT_PREAMBLE}\n\\begin{{document}}\n{code}\n\\end{{document}}"
@@ -48,8 +47,8 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
                 raw_log = (process.stderr or process.stdout).strip()
                 return (
                     f"COMPILATION_ERROR:\n{raw_log}\n\n"
-                    "INSTRUCTION FOR AI: Examine the error above, locate the invalid syntax "
-                    "or package issue, fix the LaTeX code, and invoke compile_latex again."
+                    "INSTRUCTION FOR AI: Examine the compiler error above, fix the LaTeX code, "
+                    "and invoke compile_latex again."
                 )
 
             pdf_bytes = pdf_path.read_bytes()
@@ -65,9 +64,6 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
             return f"SYSTEM_ERROR: {str(e)}"
 
 if __name__ == "__main__":
-    # 2. Pass host and port directly to run()
-    transport = os.environ.get("MCP_TRANSPORT", "sse")
-    if transport == "stdio":
-        mcp.run()
-    else:
-        mcp.run(transport="sse", host="0.0.0.0", port=PORT)
+    # Use "streamable-http" on host 0.0.0.0 and dynamically bind PORT
+    # This automatically exposes the discovery endpoint at /mcp
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=PORT)
