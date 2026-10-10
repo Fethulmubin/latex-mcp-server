@@ -6,17 +6,13 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 from starlette.routing import Route, Mount
 import uvicorn
 
-# Allow all hosts for cloud deployments (Render, Railway, etc.)
+PORT = int(os.environ.get("PORT", 8000))
 os.environ["MCP_ALLOWED_HOSTS"] = "*"
 
-PORT = int(os.environ.get("PORT", 8000))
-
-# 1. Initialize MCP Server
 mcp = MCPServer("latex-to-pdf")
 
 DEFAULT_PREAMBLE = r"""\documentclass[11pt,a4paper]{article}
@@ -72,16 +68,10 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
         except Exception as e:
             return f"SYSTEM_ERROR: {str(e)}"
 
-# 2. Extract underlying MCP Starlette app
 mcp_sub_app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
 
-# Configure allowed hosts on the underlying app if supported
-if hasattr(mcp_sub_app, "allowed_hosts"):
-    mcp_sub_app.allowed_hosts = ["*"]
-
-async def root_handler(request):
-    if request.method in ["HEAD", "GET"]:
-        return JSONResponse({"status": "ok", "name": "latex-to-pdf", "protocol": "mcp"})
+# Directly handle both /mcp and /mcp/ so NO 307 redirect occurs
+async def mcp_direct_handler(request):
     return await mcp_sub_app(request.scope, request.receive, request.send)
 
 async def oauth_discovery(request):
@@ -92,8 +82,10 @@ main_app = Starlette(
     routes=[
         Route("/.well-known/oauth-protected-resource", oauth_discovery, methods=["GET", "OPTIONS"]),
         Route("/.well-known/oauth-protected-resource/mcp", oauth_discovery, methods=["GET", "OPTIONS"]),
-        Route("/", root_handler, methods=["GET", "POST", "HEAD", "OPTIONS"]),
-        Mount("/mcp", mcp_sub_app)
+        # Exact route match prevents 307 redirect on POST
+        Route("/mcp", mcp_direct_handler, methods=["GET", "POST", "HEAD", "OPTIONS"]),
+        Route("/mcp/", mcp_direct_handler, methods=["GET", "POST", "HEAD", "OPTIONS"]),
+        Route("/", mcp_direct_handler, methods=["GET", "POST", "HEAD", "OPTIONS"]),
     ]
 )
 
@@ -107,5 +99,4 @@ main_app.add_middleware(
 )
 
 if __name__ == "__main__":
-    # Disable Uvicorn-level proxy host filtering
     uvicorn.run(main_app, host="0.0.0.0", port=PORT, proxy_headers=True, forwarded_allow_ips="*")
