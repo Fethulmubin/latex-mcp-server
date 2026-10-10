@@ -1,18 +1,13 @@
 FROM python:3.11-slim
 
-# Install system utilities and Tectonic dynamic runtime dependencies
+# Install ca-certificates and curl/tar to fetch the static binary
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
+    tar \
     fontconfig \
-    libfontconfig1 \
-    libgraphite2-3 \
-    libharfbuzz0b \
-    libicu72 \
-    libssl3 \
-    zlib1g \
-    && curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh \
-    && mv tectonic /usr/local/bin/ \
+    && curl -fsSL https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%400.15.0/tectonic-0.15.0-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin \
+    && chmod +x /usr/local/bin/tectonic \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
