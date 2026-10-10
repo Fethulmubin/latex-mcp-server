@@ -3,6 +3,11 @@ import uuid
 import subprocess
 import tempfile
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load local .env file if present
+load_dotenv()
+
 from mcp.server.mcpserver import MCPServer
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
@@ -13,16 +18,16 @@ import uvicorn
 PORT = int(os.environ.get("PORT", 8000))
 
 # Cloudflare R2 Configuration
-R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
-R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
-R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
-R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "latex-pdf")
-R2_PUBLIC_DOMAIN = os.environ.get("R2_PUBLIC_DOMAIN", "").rstrip("/")
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "").strip()
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "").strip()
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "").strip()
+R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "latex-pdf").strip()
+R2_PUBLIC_DOMAIN = os.environ.get("R2_PUBLIC_DOMAIN", "").strip().rstrip("/")
 
-# Initialize S3 client for R2
-s3_client = None
-if R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY:
-    s3_client = boto3.client(
+def get_s3_client():
+    if not (R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY):
+        return None
+    return boto3.client(
         "s3",
         endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
         aws_access_key_id=R2_ACCESS_KEY_ID,
@@ -32,9 +37,18 @@ if R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY:
 
 def upload_pdf_to_r2(pdf_bytes: bytes, filename: str) -> str:
     """Uploads PDF to Cloudflare R2 and returns direct HTTPS download URL."""
+    client = get_s3_client()
+    if not client or not R2_PUBLIC_DOMAIN:
+        missing = []
+        if not R2_ACCOUNT_ID: missing.append("R2_ACCOUNT_ID")
+        if not R2_ACCESS_KEY_ID: missing.append("R2_ACCESS_KEY_ID")
+        if not R2_SECRET_ACCESS_KEY: missing.append("R2_SECRET_ACCESS_KEY")
+        if not R2_PUBLIC_DOMAIN: missing.append("R2_PUBLIC_DOMAIN")
+        raise ValueError(f"Missing environment variables: {', '.join(missing)}")
+
     object_key = f"{uuid.uuid4().hex[:10]}_{filename}.pdf"
     
-    s3_client.put_object(
+    client.put_object(
         Bucket=R2_BUCKET_NAME,
         Key=object_key,
         Body=pdf_bytes,
@@ -43,7 +57,7 @@ def upload_pdf_to_r2(pdf_bytes: bytes, filename: str) -> str:
     )
     return f"{R2_PUBLIC_DOMAIN}/{object_key}"
 
-# 1. Initialize MCP Server
+# Initialize MCP Server
 mcp = MCPServer("latex-to-pdf")
 
 DEFAULT_PREAMBLE = r"""\documentclass[11pt,a4paper]{article}
@@ -92,11 +106,11 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
 
             pdf_bytes = pdf_path.read_bytes()
 
-            # Upload to Cloudflare R2 if configured
-            if s3_client and R2_PUBLIC_DOMAIN:
+            # Upload to Cloudflare R2
+            try:
                 download_url = upload_pdf_to_r2(pdf_bytes, filename)
-            else:
-                return "SYSTEM_ERROR: R2 storage client is not configured on the server."
+            except Exception as upload_err:
+                return f"STORAGE_ERROR: Failed to upload PDF to R2: {str(upload_err)}"
 
             return (
                 f"SUCCESS: PDF compiled successfully ({len(pdf_bytes)} bytes).\n"
@@ -110,10 +124,9 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
         except Exception as e:
             return f"SYSTEM_ERROR: {str(e)}"
 
-# 2. Get base MCP application
+# Extract base MCP application
 mcp_app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
 
-# 3. ASGI Middleware for OAuth probes and Host header rewriting
 class MCPCloudHostMiddleware:
     def __init__(self, inner_app):
         self.inner_app = inner_app
@@ -132,7 +145,7 @@ class MCPCloudHostMiddleware:
             if path in ["/mcp", "/mcp/"]:
                 scope["path"] = "/mcp"
 
-            # Rewrite Host header to satisfy MCP SDK validation
+            # Rewrite Host header to satisfy MCP SDK internal check
             new_headers = []
             for name, value in scope.get("headers", []):
                 if name.lower() == b"host":
@@ -143,7 +156,6 @@ class MCPCloudHostMiddleware:
 
         await self.inner_app(scope, receive, send)
 
-# Wrap with CORS
 app = CORSMiddleware(
     MCPCloudHostMiddleware(mcp_app),
     allow_origins=["*"],
@@ -154,4 +166,7 @@ app = CORSMiddleware(
 )
 
 if __name__ == "__main__":
+    client_status = "Configured" if get_s3_client() else "NOT Configured"
+    print(f"--> R2 Storage Client Status: {client_status}")
+    print(f"--> R2 Public Domain: {R2_PUBLIC_DOMAIN or 'MISSING'}")
     uvicorn.run(app, host="0.0.0.0", port=PORT, proxy_headers=True, forwarded_allow_ips="*")
