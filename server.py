@@ -1,13 +1,19 @@
 import os
+import uuid
 import subprocess
 import tempfile
-import base64
 from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, FileResponse, Response
 
 PORT = int(os.environ.get("PORT", 8000))
+# Dynamically determine the public URL from Render, or fallback
+PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://latex-mcp-server.onrender.com").rstrip("/")
+
+# Directory to temporarily hold generated PDFs for download
+PDF_CACHE_DIR = Path("/tmp/pdf_cache")
+PDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # 1. Initialize MCP Server
 mcp = MCPServer("latex-to-pdf")
@@ -24,7 +30,9 @@ DEFAULT_PREAMBLE = r"""\documentclass[11pt,a4paper]{article}
 
 @mcp.tool()
 def compile_latex(latex_source: str, filename: str = "document") -> str:
-    """Compiles LaTeX markup into a PDF and returns a Base64 data URI."""
+    """
+    Compiles LaTeX markup into a PDF and returns a direct HTTPS download link.
+    """
     code = latex_source.strip()
     if r"\documentclass" not in code:
         code = f"{DEFAULT_PREAMBLE}\n\\begin{{document}}\n{code}\n\\end{{document}}"
@@ -53,11 +61,18 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
                     "and invoke compile_latex again."
                 )
 
-            pdf_bytes = pdf_path.read_bytes()
-            b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+            # Generate a unique download ID and store the PDF
+            file_id = f"{uuid.uuid4().hex[:12]}_{filename}.pdf"
+            dest_file = PDF_CACHE_DIR / file_id
+            dest_file.write_bytes(pdf_path.read_bytes())
+
+            # Construct the direct download link
+            download_url = f"{PUBLIC_URL}/download/{file_id}"
+
             return (
-                f"SUCCESS: PDF created ({len(pdf_bytes)} bytes).\n"
-                f"DATA_URI: data:application/pdf;base64,{b64_pdf}"
+                f"SUCCESS: PDF compiled successfully.\n"
+                f"DOWNLOAD_URL: {download_url}\n"
+                f"INSTRUCTION: Present this link as a clickable markdown link [Download {filename}.pdf]({download_url}) to the user."
             )
 
         except subprocess.TimeoutExpired:
@@ -68,8 +83,8 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
 # 2. Get base MCP application
 mcp_app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
 
-# 3. ASGI Middleware: Normalizes paths, rewrites Host header, and serves OAuth probes
-class MCPCloudHostMiddleware:
+# 3. ASGI Middleware for OAuth probes, host headers, and serving PDF downloads
+class MCPAppWithDownloads:
     def __init__(self, inner_app):
         self.inner_app = inner_app
 
@@ -77,17 +92,34 @@ class MCPCloudHostMiddleware:
         if scope["type"] == "http":
             path = scope.get("path", "")
 
-            # 1. Answer OAuth probes directly
+            # Serve generated PDFs for one-click browser viewing/download
+            if path.startswith("/download/"):
+                filename = path.replace("/download/", "").strip()
+                file_path = PDF_CACHE_DIR / filename
+                if file_path.is_file():
+                    response = FileResponse(
+                        str(file_path),
+                        media_type="application/pdf",
+                        headers={"Content-Disposition": f'inline; filename="{filename}"'}
+                    )
+                    await response(scope, receive, send)
+                    return
+                else:
+                    response = JSONResponse({"error": "File not found or expired"}, status_code=404)
+                    await response(scope, receive, send)
+                    return
+
+            # OAuth discovery probes
             if path.startswith("/.well-known/oauth-protected-resource"):
                 response = JSONResponse({}, status_code=200)
                 await response(scope, receive, send)
                 return
 
-            # 2. Normalize path so /mcp and /mcp/ always match the internal route
+            # Normalize MCP paths
             if path in ["/mcp", "/mcp/"]:
                 scope["path"] = "/mcp"
 
-            # 3. Rewrite the Host header to satisfy internal SDK validation
+            # Rewrite Host header for MCP SDK internal check
             new_headers = []
             for name, value in scope.get("headers", []):
                 if name.lower() == b"host":
@@ -98,9 +130,9 @@ class MCPCloudHostMiddleware:
 
         await self.inner_app(scope, receive, send)
 
-# 4. Wrap with CORS
+# Wrap with CORS
 app = CORSMiddleware(
-    MCPCloudHostMiddleware(mcp_app),
+    MCPAppWithDownloads(mcp_app),
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
