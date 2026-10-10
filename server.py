@@ -4,10 +4,11 @@ import tempfile
 import base64
 from pathlib import Path
 from mcp.server.mcpserver import MCPServer
+from starlette.middleware.cors import CORSMiddleware
 
 PORT = int(os.environ.get("PORT", 8000))
 
-# Initialize MCPServer
+# 1. Initialize MCP Server
 mcp = MCPServer("latex-to-pdf")
 
 DEFAULT_PREAMBLE = r"""\documentclass[11pt,a4paper]{article}
@@ -64,6 +65,18 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
             return f"SYSTEM_ERROR: {str(e)}"
 
 if __name__ == "__main__":
-    # Use "streamable-http" on host 0.0.0.0 and dynamically bind PORT
-    # This automatically exposes the discovery endpoint at /mcp
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=PORT)
+    # 2. Extract underlying Starlette app and inject CORS middleware
+    # This allows gemini.google.com to negotiate preflight requests
+    app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
+    
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["mcp-session-id", "content-type"],
+    )
+
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
