@@ -7,9 +7,6 @@ from mcp.server.mcpserver import MCPServer
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
-# Allow all host headers for cloud proxies (Render, Cloudflare)
-os.environ["MCP_ALLOWED_HOSTS"] = "*"
-
 PORT = int(os.environ.get("PORT", 8000))
 
 # 1. Initialize MCP Server
@@ -68,34 +65,42 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
         except Exception as e:
             return f"SYSTEM_ERROR: {str(e)}"
 
-# 2. Get the base MCP Starlette application
+# 2. Get base MCP application
 mcp_app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
 
-# 3. Pure ASGI wrapper that intercepts discovery probes and passes raw ASGI (scope, receive, send)
-class CombinedMCPApp:
+# 3. ASGI Middleware: Normalizes paths, rewrites Host header, and serves OAuth probes
+class MCPCloudHostMiddleware:
     def __init__(self, inner_app):
         self.inner_app = inner_app
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             path = scope.get("path", "")
-            
-            # Handle OAuth discovery probes from Gemini
+
+            # 1. Answer OAuth probes directly
             if path.startswith("/.well-known/oauth-protected-resource"):
                 response = JSONResponse({}, status_code=200)
                 await response(scope, receive, send)
                 return
 
-            # Normalize path: map both /mcp and /mcp/ to the internal MCP handler path
+            # 2. Normalize path so /mcp and /mcp/ always match the internal route
             if path in ["/mcp", "/mcp/"]:
                 scope["path"] = "/mcp"
 
-        # Delegate directly with valid scope, receive, and send callables
+            # 3. Rewrite the Host header to satisfy internal SDK validation
+            new_headers = []
+            for name, value in scope.get("headers", []):
+                if name.lower() == b"host":
+                    new_headers.append((b"host", b"localhost:8000"))
+                else:
+                    new_headers.append((name, value))
+            scope["headers"] = new_headers
+
         await self.inner_app(scope, receive, send)
 
-# Wrap with CORS
+# 4. Wrap with CORS
 app = CORSMiddleware(
-    CombinedMCPApp(mcp_app),
+    MCPCloudHostMiddleware(mcp_app),
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
