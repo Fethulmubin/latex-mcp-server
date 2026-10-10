@@ -3,13 +3,17 @@ import subprocess
 import tempfile
 import base64
 from pathlib import Path
-from mcp.server.fastmcp import FastMCP
+# NEW (v2.x)
+from mcp.server.mcpserver import MCPServer
+
+
 
 # Render injects the PORT environment variable dynamically
 PORT = int(os.environ.get("PORT", 8000))
 
 # Initialize FastMCP
-mcp = FastMCP("latex-to-pdf", host="0.0.0.0", port=PORT)
+mcp = MCPServer("latex-to-pdf", host="0.0.0.0", port=PORT)
+
 
 # Production-grade baseline typography template fallback
 DEFAULT_PREAMBLE = r"""\documentclass[11pt,a4paper]{article}
