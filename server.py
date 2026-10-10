@@ -5,15 +5,43 @@ import tempfile
 from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse, FileResponse, Response
+from starlette.responses import JSONResponse
+import boto3
+from botocore.config import Config
+import uvicorn
 
 PORT = int(os.environ.get("PORT", 8000))
-# Dynamically determine the public URL from Render, or fallback
-PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://latex-mcp-server.onrender.com").rstrip("/")
 
-# Directory to temporarily hold generated PDFs for download
-PDF_CACHE_DIR = Path("/tmp/pdf_cache")
-PDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# Cloudflare R2 Configuration
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
+R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "latex-pdf")
+R2_PUBLIC_DOMAIN = os.environ.get("R2_PUBLIC_DOMAIN", "").rstrip("/")
+
+# Initialize S3 client for R2
+s3_client = None
+if R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY:
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        config=Config(signature_version="s3v4")
+    )
+
+def upload_pdf_to_r2(pdf_bytes: bytes, filename: str) -> str:
+    """Uploads PDF to Cloudflare R2 and returns direct HTTPS download URL."""
+    object_key = f"{uuid.uuid4().hex[:10]}_{filename}.pdf"
+    
+    s3_client.put_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=object_key,
+        Body=pdf_bytes,
+        ContentType="application/pdf",
+        ContentDisposition=f'inline; filename="{filename}.pdf"'
+    )
+    return f"{R2_PUBLIC_DOMAIN}/{object_key}"
 
 # 1. Initialize MCP Server
 mcp = MCPServer("latex-to-pdf")
@@ -31,7 +59,8 @@ DEFAULT_PREAMBLE = r"""\documentclass[11pt,a4paper]{article}
 @mcp.tool()
 def compile_latex(latex_source: str, filename: str = "document") -> str:
     """
-    Compiles LaTeX markup into a PDF and returns a direct HTTPS download link.
+    Compiles LaTeX markup into a PDF, uploads to Cloudflare R2, 
+    and returns a direct HTTPS download link.
     """
     code = latex_source.strip()
     if r"\documentclass" not in code:
@@ -61,18 +90,19 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
                     "and invoke compile_latex again."
                 )
 
-            # Generate a unique download ID and store the PDF
-            file_id = f"{uuid.uuid4().hex[:12]}_{filename}.pdf"
-            dest_file = PDF_CACHE_DIR / file_id
-            dest_file.write_bytes(pdf_path.read_bytes())
+            pdf_bytes = pdf_path.read_bytes()
 
-            # Construct the direct download link
-            download_url = f"{PUBLIC_URL}/download/{file_id}"
+            # Upload to Cloudflare R2 if configured
+            if s3_client and R2_PUBLIC_DOMAIN:
+                download_url = upload_pdf_to_r2(pdf_bytes, filename)
+            else:
+                return "SYSTEM_ERROR: R2 storage client is not configured on the server."
 
             return (
-                f"SUCCESS: PDF compiled successfully.\n"
+                f"SUCCESS: PDF compiled successfully ({len(pdf_bytes)} bytes).\n"
                 f"DOWNLOAD_URL: {download_url}\n"
-                f"INSTRUCTION: Present this link as a clickable markdown link [Download {filename}.pdf]({download_url}) to the user."
+                f"INSTRUCTION FOR AI: Present this link as a clean, clickable Markdown link: "
+                f"[Download {filename}.pdf]({download_url}) in your response."
             )
 
         except subprocess.TimeoutExpired:
@@ -83,8 +113,8 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
 # 2. Get base MCP application
 mcp_app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
 
-# 3. ASGI Middleware for OAuth probes, host headers, and serving PDF downloads
-class MCPAppWithDownloads:
+# 3. ASGI Middleware for OAuth probes and Host header rewriting
+class MCPCloudHostMiddleware:
     def __init__(self, inner_app):
         self.inner_app = inner_app
 
@@ -92,34 +122,17 @@ class MCPAppWithDownloads:
         if scope["type"] == "http":
             path = scope.get("path", "")
 
-            # Serve generated PDFs for one-click browser viewing/download
-            if path.startswith("/download/"):
-                filename = path.replace("/download/", "").strip()
-                file_path = PDF_CACHE_DIR / filename
-                if file_path.is_file():
-                    response = FileResponse(
-                        str(file_path),
-                        media_type="application/pdf",
-                        headers={"Content-Disposition": f'inline; filename="{filename}"'}
-                    )
-                    await response(scope, receive, send)
-                    return
-                else:
-                    response = JSONResponse({"error": "File not found or expired"}, status_code=404)
-                    await response(scope, receive, send)
-                    return
-
             # OAuth discovery probes
             if path.startswith("/.well-known/oauth-protected-resource"):
                 response = JSONResponse({}, status_code=200)
                 await response(scope, receive, send)
                 return
 
-            # Normalize MCP paths
+            # Normalize path
             if path in ["/mcp", "/mcp/"]:
                 scope["path"] = "/mcp"
 
-            # Rewrite Host header for MCP SDK internal check
+            # Rewrite Host header to satisfy MCP SDK validation
             new_headers = []
             for name, value in scope.get("headers", []):
                 if name.lower() == b"host":
@@ -132,7 +145,7 @@ class MCPAppWithDownloads:
 
 # Wrap with CORS
 app = CORSMiddleware(
-    MCPAppWithDownloads(mcp_app),
+    MCPCloudHostMiddleware(mcp_app),
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
@@ -141,5 +154,4 @@ app = CORSMiddleware(
 )
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT, proxy_headers=True, forwarded_allow_ips="*")
