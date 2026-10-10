@@ -6,9 +6,13 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, Mount
 import uvicorn
+
+# Allow all hosts for cloud deployments (Render, Railway, etc.)
+os.environ["MCP_ALLOWED_HOSTS"] = "*"
 
 PORT = int(os.environ.get("PORT", 8000))
 
@@ -68,28 +72,28 @@ def compile_latex(latex_source: str, filename: str = "document") -> str:
         except Exception as e:
             return f"SYSTEM_ERROR: {str(e)}"
 
-# 2. Get the streamable HTTP Starlette sub-app and its lifespan
-mcp_app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
+# 2. Extract underlying MCP Starlette app
+mcp_sub_app = mcp.streamable_http_app() if hasattr(mcp, "streamable_http_app") else mcp.app
 
-# Handle OAuth probe so Gemini knows no auth is required
+# Configure allowed hosts on the underlying app if supported
+if hasattr(mcp_sub_app, "allowed_hosts"):
+    mcp_sub_app.allowed_hosts = ["*"]
+
+async def root_handler(request):
+    if request.method in ["HEAD", "GET"]:
+        return JSONResponse({"status": "ok", "name": "latex-to-pdf", "protocol": "mcp"})
+    return await mcp_sub_app(request.scope, request.receive, request.send)
+
 async def oauth_discovery(request):
     return JSONResponse({}, status_code=200)
 
-async def root_probe(request):
-    if request.method == "HEAD":
-        return Response(status_code=200)
-    # Forward any GET or other probes
-    return JSONResponse({"status": "ok", "server": "latex-to-pdf", "protocol": "mcp"})
-
-# 3. Use the MCP app's lifespan so the anyio TaskGroup initializes properly!
 main_app = Starlette(
-    lifespan=mcp_app.router.lifespan_context,
+    lifespan=getattr(mcp_sub_app.router, "lifespan_context", None),
     routes=[
         Route("/.well-known/oauth-protected-resource", oauth_discovery, methods=["GET", "OPTIONS"]),
         Route("/.well-known/oauth-protected-resource/mcp", oauth_discovery, methods=["GET", "OPTIONS"]),
-        # Mount the MCP handler directly on BOTH /mcp and root / for POST JSON-RPC requests
-        Mount("/mcp", mcp_app),
-        Mount("/", mcp_app)
+        Route("/", root_handler, methods=["GET", "POST", "HEAD", "OPTIONS"]),
+        Mount("/mcp", mcp_sub_app)
     ]
 )
 
@@ -103,4 +107,5 @@ main_app.add_middleware(
 )
 
 if __name__ == "__main__":
-    uvicorn.run(main_app, host="0.0.0.0", port=PORT)
+    # Disable Uvicorn-level proxy host filtering
+    uvicorn.run(main_app, host="0.0.0.0", port=PORT, proxy_headers=True, forwarded_allow_ips="*")
