@@ -2,8 +2,7 @@
 
 <div align="center">
 
-[![M8ven Verified](https://api.m8ven.ai/v1/badges/a9d59ea)](https://m8ven.ai)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![M8ven Score](https://m8ven.ai/badge/mcp/fethulmubin-latex-mcp-server-za472i?v=c728982529ee2c210b0cbbe1ce0122e0?variant=verified)](https://m8ven.ai/mcp/fethulmubin-latex-mcp-server-za472i?s=readme)
 [![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED?logo=docker&logoColor=white)](Dockerfile)
 [![Protocol](https://img.shields.io/badge/MCP-Streamable%20HTTP-black)](https://modelcontextprotocol.io)
 [![Cloudflare R2](https://img.shields.io/badge/Storage-Cloudflare%20R2-F38020?logo=cloudflare&logoColor=white)](https://www.cloudflare.com/products/r2/)
