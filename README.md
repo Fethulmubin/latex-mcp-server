@@ -46,4 +46,4 @@ Compiles raw LaTeX source code into a publication-quality PDF.
 2. Click **Connect custom app**.
 3. Enter your remote endpoint:
    ```text
-   https://latex-mcp-server.onrender.com/mcp[.onrender.com/mcp](https://.onrender.com/mcp)
+   https://latex-mcp-server.onrender.com/mcp
