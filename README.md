@@ -41,7 +41,7 @@ Compiles raw LaTeX source code into a publication-quality PDF.
 
 ## 🔌 Client Configuration
 
-### 1. Gemini (Spark / Custom Connected Apps)
+### 1. Gemini or ChatGpt (Custom Connected Apps/ Plugins)
 1. Navigate to **gemini.google.com/spark/apps** or **Settings → Connected Apps**.
 2. Click **Connect custom app**.
 3. Enter your remote endpoint:
