@@ -3,6 +3,7 @@
 <div align="center">
 
 [![M8ven Score](https://m8ven.ai/badge/mcp/fethulmubin-latex-mcp-server-za472i?v=c728982529ee2c210b0cbbe1ce0122e0?variant=verified)](https://m8ven.ai/mcp/fethulmubin-latex-mcp-server-za472i?s=readme)
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/fethulmubin/latex-mcp-server)
 [![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED?logo=docker&logoColor=white)](Dockerfile)
 [![Protocol](https://img.shields.io/badge/MCP-Streamable%20HTTP-black)](https://modelcontextprotocol.io)
 [![Cloudflare R2](https://img.shields.io/badge/Storage-Cloudflare%20R2-F38020?logo=cloudflare&logoColor=white)](https://www.cloudflare.com/products/r2/)
